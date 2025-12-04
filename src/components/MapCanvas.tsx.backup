@@ -1,0 +1,374 @@
+events,
+    config,
+    onRegionClick,
+    onDeviceClick,
+    onEventClick,
+    selectedRegion
+}) => {
+    const canvasRef = useRef<HTMLCanvasElement>(null);
+    const [zoom, setZoom] = useState(1);
+    const [offset, setOffset] = useState({ x: 0, y: 0 });
+    const [isDragging, setIsDragging] = useState(false);
+    const [dragStart, setDragStart] = useState({ x: 0, y: 0 });
+    const [hoveredRegion, setHoveredRegion] = useState<string | null>(null);
+    const [lastUpdateTime, setLastUpdateTime] = useState(Date.now());
+
+    // 动画循环 - 持续重绘以显示设备移动
+    useEffect(() => {
+        let animationId: number;
+
+        const animate = () => {
+            setLastUpdateTime(Date.now());
+            animationId = requestAnimationFrame(animate);
+        };
+
+        animationId = requestAnimationFrame(animate);
+
+        return () => {
+            if (animationId) {
+                cancelAnimationFrame(animationId);
+            }
+        };
+    }, []);
+
+    // 绘制地图
+    useEffect(() => {
+        const canvas = canvasRef.current;
+        if (!canvas) return;
+
+        const ctx = canvas.getContext('2d');
+        if (!ctx) return;
+
+        // 清空画布
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+        // 应用变换
+        ctx.save();
+        ctx.translate(offset.x, offset.y);
+        ctx.scale(zoom, zoom);
+
+        // 绘制背景
+        ctx.fillStyle = config.backgroundColor || '#0a0f1a';
+        ctx.fillRect(0, 0, config.bounds.width, config.bounds.height);
+
+        // 绘制网格
+        if (config.showGrid) {
+            drawGrid(ctx, config);
+        }
+
+        // 绘制地块
+        regions.forEach(region => {
+            drawRegion(ctx, region, region.id === hoveredRegion, region.id === selectedRegion);
+        });
+
+        // 绘制事件标记
+        events.forEach(event => {
+            drawEvent(ctx, event);
+        });
+
+        // 绘制设备
+        devices.forEach(device => {
+            drawDevice(ctx, device);
+        });
+
+        ctx.restore();
+    }, [regions, devices, events, config, zoom, offset, hoveredRegion, selectedRegion, lastUpdateTime]);
+
+    // 绘制网格
+    const drawGrid = (ctx: CanvasRenderingContext2D, config: MapConfig) => {
+        ctx.strokeStyle = 'rgba(255, 255, 255, 0.05)';
+        ctx.lineWidth = 1;
+
+        for (let x = 0; x <= config.bounds.width; x += config.gridSize) {
+            ctx.beginPath();
+            ctx.moveTo(x, 0);
+            ctx.lineTo(x, config.bounds.height);
+            ctx.stroke();
+        }
+
+        for (let y = 0; y <= config.bounds.height; y += config.gridSize) {
+            ctx.beginPath();
+            ctx.moveTo(0, y);
+            ctx.lineTo(config.bounds.width, y);
+            ctx.stroke();
+        }
+    };
+
+    // 绘制地块
+    const drawRegion = (
+        ctx: CanvasRenderingContext2D,
+        region: Region,
+        isHovered: boolean,
+        isSelected: boolean
+    ) => {
+        const boundary = region.boundary;
+
+        ctx.save();
+
+        // 绘制边界
+        if ('points' in boundary) {
+            // 多边形
+            ctx.beginPath();
+            boundary.points.forEach((point, index) => {
+                if (index === 0) {
+                    ctx.moveTo(point.x, point.y);
+                } else {
+                    ctx.lineTo(point.x, point.y);
+                }
+            });
+            ctx.closePath();
+        } else {
+            // 矩形
+            ctx.beginPath();
+            ctx.rect(boundary.x, boundary.y, boundary.width, boundary.height);
+        }
+
+        // 填充 - 优先使用纹理，否则用颜色
+        if (region.textureId) {
+            const texture = textureLibrary.getTexture(region.textureId);
+            if (texture && texture.pattern) {
+                ctx.fillStyle = texture.pattern;
+                ctx.fill();
+
+                // 添加半透明颜色叠加层以显示状态
+                const alpha = isHovered ? 0.15 : isSelected ? 0.1 : 0.05;
+                ctx.fillStyle = region.color + Math.floor(alpha * 255).toString(16).padStart(2, '0');
+                ctx.fill();
+            } else {
+                // 纹理加载失败，使用颜色
+                const alpha = isHovered ? 0.3 : isSelected ? 0.25 : 0.15;
+                ctx.fillStyle = region.color + Math.floor(alpha * 255).toString(16).padStart(2, '0');
+                ctx.fill();
+            }
+        } else {
+            // 无纹理，使用纯色
+            const alpha = isHovered ? 0.3 : isSelected ? 0.25 : 0.15;
+            ctx.fillStyle = region.color + Math.floor(alpha * 255).toString(16).padStart(2, '0');
+            ctx.fill();
+        }
+
+        // 边框
+        ctx.strokeStyle = region.color;
+        ctx.lineWidth = isSelected ? 3 : isHovered ? 2 : 1.5;
+
+        // 根据状态添加虚线效果
+        if (region.status === 'warning') {
+            ctx.setLineDash([5, 3]);
+        } else if (region.status === 'critical') {
+            ctx.setLineDash([10, 5]);
+            ctx.strokeStyle = '#ef4444';
+            ctx.lineWidth = 3;
+        }
+
+        ctx.stroke();
+        ctx.setLineDash([]);
+
+        // 绘制地块名称
+        ctx.fillStyle = '#ffffff';
+        ctx.font = 'bold 14px Arial';
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillText(region.name, region.position.x, region.position.y - 10);
+
+        // 绘制图标
+        ctx.font = '24px Arial';
+        ctx.fillText(region.icon, region.position.x, region.position.y + 10);
+
+        // 绘制状态指示器
+        if (region.status === 'warning' || region.status === 'critical') {
+            const pulseSize = 8 + Math.sin(Date.now() / 300) * 2;
+            ctx.fillStyle = region.status === 'critical' ? '#ef4444' : '#f59e0b';
+            ctx.beginPath();
+            ctx.arc(region.position.x + 30, region.position.y - 20, pulseSize, 0, Math.PI * 2);
+            ctx.fill();
+        }
+
+        ctx.restore();
+    };
+
+    // 绘制设备
+    const drawDevice = (ctx: CanvasRenderingContext2D, device: Device) => {
+        ctx.save();
+
+        const size = 32;
+        const x = device.position.x;
+        const y = device.position.y;
+
+        // 设备底座阴影
+        ctx.fillStyle = 'rgba(0, 0, 0, 0.3)';
+        ctx.beginPath();
+        ctx.ellipse(x, y + size / 2 + 2, size / 2, size / 6, 0, 0, Math.PI * 2);
+        ctx.fill();
+
+        // 设备图标背景
+        const bgColor = device.status === 'active' ? '#22c55e' :
+            device.status === 'error' ? '#ef4444' :
+                '#94a3b8';
+
+        ctx.fillStyle = bgColor + '40';
+        ctx.strokeStyle = bgColor;
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        ctx.arc(x, y, size / 2, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.stroke();
+
+        // 设备图标
+        ctx.font = `${size * 0.6}px Arial`;
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillText(device.icon, x, y);
+
+        // 电池指示器
+        if (device.battery < 30) {
+            ctx.fillStyle = '#ef4444';
+            ctx.font = '10px Arial';
+            ctx.fillText(`${device.battery}%`, x, y + size / 2 + 12);
+        }
+
+        // 移动方向指示
+        if (device.isMoving) {
+            ctx.save();
+            ctx.translate(x, y);
+            ctx.rotate((device.heading * Math.PI) / 180);
+            ctx.strokeStyle = '#22c55e';
+            ctx.lineWidth = 2;
+            ctx.beginPath();
+            ctx.moveTo(0, -size / 2 - 5);
+            ctx.lineTo(5, -size / 2 - 10);
+            ctx.moveTo(0, -size / 2 - 5);
+            ctx.lineTo(-5, -size / 2 - 10);
+            ctx.stroke();
+            ctx.restore();
+        }
+
+        ctx.restore();
+    };
+
+    // 绘制事件
+    const drawEvent = (ctx: CanvasRenderingContext2D, event: GameEvent) => {
+        ctx.save();
+
+        const size = 24;
+        const x = event.position.x;
+        const y = event.position.y;
+
+        // 事件脉冲效果
+        if (event.status === 'pending' || event.status === 'processing') {
+            const pulse = 1 + Math.sin(Date.now() / 400) * 0.2;
+            const color = event.severity === 'critical' ? '#ef4444' :
+                event.severity === 'warning' ? '#f59e0b' : '#3b82f6';
+
+            ctx.strokeStyle = color + '40';
+            ctx.lineWidth = 2;
+            ctx.beginPath();
+            ctx.arc(x, y, size * pulse, 0, Math.PI * 2);
+            ctx.stroke();
+        }
+
+        // 事件图标
+        ctx.font = `${size}px Arial`;
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillText(event.icon, x, y);
+
+        ctx.restore();
+    };
+
+    // 鼠标事件处理
+    const handleMouseDown = (e: React.MouseEvent) => {
+        setIsDragging(true);
+        setDragStart({ x: e.clientX - offset.x, y: e.clientY - offset.y });
+    };
+
+    const handleMouseMove = (e: React.MouseEvent) => {
+        if (isDragging) {
+            setOffset({
+                x: e.clientX - dragStart.x,
+                y: e.clientY - dragStart.y
+            });
+        } else {
+            // 检测悬停的地块
+            const canvas = canvasRef.current;
+            if (!canvas) return;
+
+            const rect = canvas.getBoundingClientRect();
+            const x = (e.clientX - rect.left - offset.x) / zoom;
+            const y = (e.clientY - rect.top - offset.y) / zoom;
+
+            const hovered = regions.find(region => {
+                const boundary = region.boundary;
+                if ('points' in boundary) {
+                    // 多边形点击检测（简化版）
+                    return false; // TODO: 实现多边形点击检测
+                } else {
+                    return x >= boundary.x && x <= boundary.x + boundary.width &&
+                        y >= boundary.y && y <= boundary.y + boundary.height;
+                }
+            });
+
+            setHoveredRegion(hovered?.id || null);
+        }
+    };
+
+    const handleMouseUp = () => {
+        setIsDragging(false);
+    };
+
+    const handleClick = (e: React.MouseEvent) => {
+        if (hoveredRegion && onRegionClick) {
+            const region = regions.find(r => r.id === hoveredRegion);
+            if (region) onRegionClick(region);
+        }
+    };
+
+    const handleWheel = (e: React.WheelEvent) => {
+        e.preventDefault();
+        const delta = e.deltaY > 0 ? 0.9 : 1.1;
+        setZoom(prev => Math.max(0.5, Math.min(3, prev * delta)));
+    };
+
+    return (
+        <div className="relative w-full h-full overflow-hidden bg-gray-900">
+            <canvas
+                ref={canvasRef}
+                width={800}
+                height={600}
+                className="w-full h-full cursor-move"
+                onMouseDown={handleMouseDown}
+                onMouseMove={handleMouseMove}
+                onMouseUp={handleMouseUp}
+                onMouseLeave={handleMouseUp}
+                onClick={handleClick}
+                onWheel={handleWheel}
+            />
+
+            {/* 缩放控制 */}
+            <div className="absolute bottom-4 right-4 flex flex-col gap-2">
+                <button
+                    onClick={() => setZoom(prev => Math.min(3, prev * 1.2))}
+                    className="px-3 py-2 bg-black/60 backdrop-blur-md border border-white/20 rounded-lg text-white hover:bg-white/10 transition-colors"
+                >
+                    +
+                </button>
+                <button
+                    onClick={() => setZoom(prev => Math.max(0.5, prev * 0.8))}
+                    className="px-3 py-2 bg-black/60 backdrop-blur-md border border-white/20 rounded-lg text-white hover:bg-white/10 transition-colors"
+                >
+                    −
+                </button>
+                <button
+                    onClick={() => { setZoom(1); setOffset({ x: 0, y: 0 }); }}
+                    className="px-3 py-2 bg-black/60 backdrop-blur-md border border-white/20 rounded-lg text-white hover:bg-white/10 transition-colors text-xs"
+                >
+                    重置
+                </button>
+            </div>
+
+            {/* 缩放比例显示 */}
+            <div className="absolute top-4 right-4 px-3 py-1 bg-black/60 backdrop-blur-md border border-white/20 rounded-lg text-white text-xs">
+                {Math.round(zoom * 100)}%
+            </div>
+        </div>
+    );
+};
